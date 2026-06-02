@@ -2357,29 +2357,10 @@ class Scanner extends EventEmitter {
     return classifyNow().session;
   }
 
-  /** Fires an ntfy push when the market transitions from closed → open. */
+  /** Logs market closed → open transition (push notification removed — not actionable). */
   _notifyMarketResuming() {
-    const cfg = this.cfg;
-    if (!cfg.ntfyTopic) {
-      this._log('[ntfy] market-resume skipped — NTFY_TOPIC not set', 'signal');
-      return;
-    }
-    try {
-      const sess = classifyNow().session || 'LIVE';
-      const headers = {
-        'Content-Type': 'text/plain',
-        'Title':    'Aurum Signals - Market Resuming',
-        'Priority': 'default',
-        'Tags':     'chart_with_upwards_trend',
-      };
-      if (cfg.ntfyToken) headers['Authorization'] = `Bearer ${cfg.ntfyToken}`;
-      const body = `📈 Market reopening — scanner active\nSession: ${sess}\nStrategies: MNQ_INTRADAY, MGC_SCALP`;
-      const ntfyUrl = `${cfg.ntfyUrl}/${cfg.ntfyTopic}`;
-      this._log(`📈 Market resuming — sending ntfy → ${ntfyUrl} (session=${sess})`, 'signal');
-      fetch(ntfyUrl, { method: 'POST', headers, body })
-        .then(r => this._log(`[ntfy] market-resume sent — HTTP ${r.status}`, 'signal'))
-        .catch(err => this._log(`[ntfy] market-resume FAILED: ${err.message}`, 'signal'));
-    } catch (e) { this._log(`[ntfy] market-resume error: ${e.message}`, 'signal'); }
+    const sess = classifyNow().session || 'LIVE';
+    this._log(`MARKET_RESUMING session=${sess} scanner=active`, 'signal');
   }
 
   // ── Main scan cycle ───────────────────────────────────────────────────────────

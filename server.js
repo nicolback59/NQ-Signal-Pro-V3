@@ -3601,7 +3601,10 @@ app.get('/api/health', (req, res) => {
 
     // ── Overall status ──────────────────────────────────────────────────────
     const scannerHealthy  = (workers['scanner-worker']?.healthy) ?? false;
-    const overallHealthy  = dbOk && scannerHealthy && reconHealthy;
+    // reconHealthy is intentionally excluded: reconcile-worker runs on the Droplet
+    // (PM2), not on Render. Its staleness is reported in the response but must
+    // not block the 200 — otherwise Render's health check always fails.
+    const overallHealthy  = dbOk && scannerHealthy;
 
     res.set('Cache-Control', 'no-store');
     res.status(overallHealthy ? 200 : 503).json({
@@ -5172,7 +5175,26 @@ app.listen(PORT, '0.0.0.0', () => {
 
     scanner.on('signal',    data => _broadcastSSE('signal',    data));
     scanner.on('scan',      data => _broadcastSSE('scan',      data));
-    scanner.on('heartbeat', data => _broadcastSSE('heartbeat', data));
+    scanner.on('heartbeat', data => {
+      _broadcastSSE('heartbeat', data);
+      // Write to worker_health so /api/health sees the inline scanner as healthy.
+      // scanner-worker.js does this when running as a PM2 process; in inline mode
+      // (Render) we mirror that write here so the health check returns 200.
+      try {
+        db.prepare(`
+          INSERT INTO worker_health (worker_name, status, last_heartbeat, metadata)
+          VALUES ('scanner-worker', 'RUNNING', datetime('now'), ?)
+          ON CONFLICT(worker_name) DO UPDATE SET
+            status         = 'RUNNING',
+            last_heartbeat = datetime('now'),
+            metadata       = excluded.metadata
+        `).run(JSON.stringify({
+          scanCount:  data.scanCount,
+          feedType:   data.feedType,
+          dataStatus: data.marketClosed ? 'CLOSED' : 'DATA_OK',
+        }));
+      } catch (_) {}
+    });
     scanner.on('backtest',  data => _broadcastSSE('backtest',  data));
     scanner.on('outcome',   data => _broadcastSSE('outcome',   data));
     scanner.on('error',     data => _broadcastSSE('scannerError', data));
