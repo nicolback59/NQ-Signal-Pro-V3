@@ -25,6 +25,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 const path     = require('path');
 const fs       = require('fs');
 const Database = require('better-sqlite3');
+const { openDb, logWorkerError } = require('./worker-utils');
 
 const DB_PATH     = process.env.DB_PATH    || path.join(__dirname, '..', 'signals.db');
 const BACKUP_DIR  = process.env.BACKUP_DIR || path.join(__dirname, '..', 'backups');
@@ -220,5 +221,6 @@ runBackup()
   })
   .catch(err => {
     console.error(`[${WORKER_NAME}] FAILED:`, err.message);
+    try { const db = openDb(); logWorkerError(db, WORKER_NAME, err); db.close(); } catch (_) {}
     process.exit(1);
   });

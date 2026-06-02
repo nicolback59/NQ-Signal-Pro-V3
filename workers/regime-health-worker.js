@@ -15,7 +15,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const { openDb, heartbeat, logWorkerError, sendNotification } = require('./worker-utils');
+const { openDb, heartbeat, logWorkerError, sendNotification, withOverridesLock } = require('./worker-utils');
 
 const WORKER_NAME = 'regime-health';
 
@@ -93,26 +93,6 @@ function behaviorMode(health) {
   return 'STANDBY';
 }
 
-// ─── Adaptive overrides helpers ──────────────────────────────────────────────
-
-function loadOverrides(db) {
-  try {
-    const row = db.prepare(
-      "SELECT params_json FROM strategy_params WHERE instrument = 'ADAPTIVE_OVERRIDES'"
-    ).get();
-    return row?.params_json ? JSON.parse(row.params_json) : {};
-  } catch (_) { return {}; }
-}
-
-function saveOverrides(db, overrides) {
-  db.prepare(`
-    INSERT INTO strategy_params (instrument, params_json, updated_at)
-    VALUES ('ADAPTIVE_OVERRIDES', ?, datetime('now'))
-    ON CONFLICT(instrument) DO UPDATE SET
-      params_json = excluded.params_json,
-      updated_at  = excluded.updated_at
-  `).run(JSON.stringify(overrides));
-}
 
 // ─── Main run ─────────────────────────────────────────────────────────────────
 
@@ -214,65 +194,64 @@ async function run() {
       const prevMode   = lastLog?.behavior_mode ?? null;
       const modeChanged = prevMode !== mode;
 
-      // ── 6. Update adaptive overrides ──────────────────────────────────────
-      const overrides = loadOverrides(db);
-      if (!overrides[strategy]) {
-        overrides[strategy] = {
-          paused: false, blockLong: false, blockShort: false,
-          blockedSessions: [], blockedRegimes: [], reasons: [],
-          manualPause: false,
-        };
-      }
-      const ov = overrides[strategy];
-      if (!ov.reasons) ov.reasons = [];
-
-      let ovChanged = false;
-
-      if (mode === 'STANDBY') {
-        if (!ov.manualPause) {
-          const alreadyHasReason = ov.reasons.some(r => r.startsWith('regime-health: STANDBY'));
-          if (!alreadyHasReason) {
-            ov.reasons.push(`regime-health: STANDBY (REGIME health=${healthScore})`);
-            ov.paused = true;
-            ovChanged  = true;
-          } else if (!ov.paused) {
-            ov.paused = true;
-            ovChanged  = true;
+      // ── 6. Update adaptive overrides (atomic read-modify-write via BEGIN IMMEDIATE) ──
+      let ovChanged    = false;
+      let ovPausedAfter = false;
+      try {
+        withOverridesLock(db, (overrides) => {
+          if (!overrides[strategy]) {
+            overrides[strategy] = {
+              paused: false, blockLong: false, blockShort: false,
+              blockedSessions: [], blockedRegimes: [], reasons: [],
+              manualPause: false,
+            };
           }
-        }
-        // Always clear aggressiveMode when standing down
-        if (ov.aggressiveMode) { ov.aggressiveMode = false; ovChanged = true; }
-        if (ov.behaviorMode !== 'STANDBY') { ov.behaviorMode = 'STANDBY'; ovChanged = true; }
-      } else if (mode === 'NORMAL' || mode === 'AGGRESSIVE') {
-        const hasRegimeHealthReasons = ov.reasons.some(r => r.startsWith('regime-health:'));
-        const hasOtherReasons        = ov.reasons.some(r => !r.startsWith('regime-health:'));
+          const ov = overrides[strategy];
+          if (!ov.reasons) ov.reasons = [];
 
-        if (hasRegimeHealthReasons && !hasOtherReasons && ov.paused && !ov.manualPause) {
-          ov.reasons = ov.reasons.filter(r => !r.startsWith('regime-health:'));
-          ov.paused  = false;
-          ovChanged   = true;
-        } else if (hasRegimeHealthReasons && !hasOtherReasons) {
-          ov.reasons = ov.reasons.filter(r => !r.startsWith('regime-health:'));
-          ovChanged   = true;
-        }
+          if (mode === 'STANDBY') {
+            if (!ov.manualPause) {
+              const alreadyHasReason = ov.reasons.some(r => r.startsWith('regime-health: STANDBY'));
+              if (!alreadyHasReason) {
+                ov.reasons.push(`regime-health: STANDBY (REGIME health=${healthScore})`);
+                ov.paused = true;
+                ovChanged  = true;
+              } else if (!ov.paused) {
+                ov.paused = true;
+                ovChanged  = true;
+              }
+            }
+            if (ov.aggressiveMode) { ov.aggressiveMode = false; ovChanged = true; }
+            if (ov.behaviorMode !== 'STANDBY') { ov.behaviorMode = 'STANDBY'; ovChanged = true; }
+          } else if (mode === 'NORMAL' || mode === 'AGGRESSIVE') {
+            const hasRegimeHealthReasons = ov.reasons.some(r => r.startsWith('regime-health:'));
+            const hasOtherReasons        = ov.reasons.some(r => !r.startsWith('regime-health:'));
 
-        // AGGRESSIVE mode: set flag so adaptive-cooldown applies 0.70× multiplier
-        const wantsAggressive = mode === 'AGGRESSIVE';
-        if ((ov.aggressiveMode ?? false) !== wantsAggressive) {
-          ov.aggressiveMode = wantsAggressive;
-          ovChanged = true;
-        }
-        // DEFENSIVE: do nothing else to overrides
-      }
+            if (hasRegimeHealthReasons && !hasOtherReasons && ov.paused && !ov.manualPause) {
+              ov.reasons = ov.reasons.filter(r => !r.startsWith('regime-health:'));
+              ov.paused  = false;
+              ovChanged   = true;
+            } else if (hasRegimeHealthReasons && !hasOtherReasons) {
+              ov.reasons = ov.reasons.filter(r => !r.startsWith('regime-health:'));
+              ovChanged   = true;
+            }
 
-      // Always keep behaviorMode current for portfolio engine + scanner quality scoring
-      if (mode !== 'STANDBY' && ov.behaviorMode !== mode) {
-        ov.behaviorMode = mode;
-        ovChanged = true;
-      }
+            const wantsAggressive = mode === 'AGGRESSIVE';
+            if ((ov.aggressiveMode ?? false) !== wantsAggressive) {
+              ov.aggressiveMode = wantsAggressive;
+              ovChanged = true;
+            }
+          }
 
-      if (ovChanged) {
-        saveOverrides(db, overrides);
+          if (mode !== 'STANDBY' && ov.behaviorMode !== mode) {
+            ov.behaviorMode = mode;
+            ovChanged = true;
+          }
+
+          ovPausedAfter = ov.paused;
+        });
+      } catch (lockErr) {
+        console.error(`[${WORKER_NAME}] withOverridesLock failed for ${strategy}: ${lockErr.message}`);
       }
 
       // ── 7. Post agent_messages on state change ────────────────────────────
@@ -340,7 +319,7 @@ async function run() {
       const notes = [];
       if (!regimeRow)  notes.push('no regime_states row');
       if (!perfRow)    notes.push('no regime_performance_stats');
-      if (ovChanged)   notes.push(`overrides updated: paused=${ov.paused}`);
+      if (ovChanged)   notes.push(`overrides updated: paused=${ovPausedAfter}`);
       if (modeChanged) notes.push(`mode changed: ${prevMode ?? 'none'} → ${mode}`);
 
       insertLog.run(

@@ -28,7 +28,7 @@ const {
 } = require('../signals/signal-state-machine');
 
 const WORKER_NAME  = 'reconcile-worker';
-const LIVE_STRATS  = new Set(['MNQ_INTRADAY', 'MNQ_SWING', 'MNQ_50PT', 'MGC_SCALP', 'NQ_NY_OPEN', 'MNQ_FIRE']);
+const LIVE_STRATS  = new Set(['MNQ_INTRADAY', 'MGC_SCALP', 'NQ_NY_OPEN', 'MNQ_FIRE']);
 
 // ── DB ────────────────────────────────────────────────────────────────────────
 const db = openDb();
@@ -67,7 +67,7 @@ const _getPending = db.prepare(`
     AND  s.entry IS NOT NULL
     AND  s.received_at IS NOT NULL
     AND  (s.trade_status IS NULL OR s.trade_status = 'ACTIVE')
-    AND  s.strategy_name IN ('MNQ_INTRADAY', 'MNQ_SWING', 'MNQ_50PT', 'MGC_SCALP', 'NQ_NY_OPEN', 'MNQ_FIRE')
+    AND  s.strategy_name IN ('MNQ_INTRADAY', 'MGC_SCALP', 'NQ_NY_OPEN', 'MNQ_FIRE')
 `);
 
 const _insertOutcome   = db.prepare(`INSERT OR IGNORE INTO outcomes (signal_id, result, exit_price, exit_at, pnl_pts) VALUES (?,?,?,?,?)`);
