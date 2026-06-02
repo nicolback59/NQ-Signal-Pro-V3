@@ -293,6 +293,7 @@ async function run() {
 
   // ── 6. Worker heartbeat staleness ─────────────────────────────────────────
   const CRITICAL_WORKERS = [
+    { name: 'scanner-worker',            maxStaleMin: 3  },
     { name: 'reconcile-worker',          maxStaleMin: 15 },
     { name: 'circuit-breaker',           maxStaleMin: 90 },
     { name: 'drawdown-protection',       maxStaleMin: 90 },

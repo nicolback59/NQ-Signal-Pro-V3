@@ -87,6 +87,7 @@ function detectDegradation(db, strategy) {
   const freq = db.prepare(
     `SELECT COUNT(*) AS n FROM trade_dna
      WHERE strategy_name = ? AND outcome IN ('WIN','LOSS')
+       AND source = 'LIVE'
        AND trade_date >= date('now', '-28 days')`
   ).get(strategy);
   if ((freq?.n ?? 0) < 4) flags.push(`frequency_collapse:${freq?.n ?? 0}_trades_28d`);
@@ -95,11 +96,13 @@ function detectDegradation(db, strategy) {
   const exp30 = db.prepare(
     `SELECT AVG(pnl_pts) AS exp FROM trade_dna
      WHERE strategy_name = ? AND outcome IN ('WIN','LOSS')
+       AND source = 'LIVE'
        AND trade_date >= date('now', '-30 days')`
   ).get(strategy);
   const exp7 = db.prepare(
     `SELECT AVG(pnl_pts) AS exp FROM trade_dna
      WHERE strategy_name = ? AND outcome IN ('WIN','LOSS')
+       AND source = 'LIVE'
        AND trade_date >= date('now', '-7 days')`
   ).get(strategy);
   if ((exp30?.exp ?? 0) < 0 && (exp7?.exp ?? 0) < 0) {

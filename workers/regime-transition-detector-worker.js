@@ -31,7 +31,7 @@ const STABLE_HOURS        = 2;    // hours of single regime before clearing tran
 
 // Maps instrument -> strategies that trade it
 const INSTRUMENT_STRATEGIES = {
-  MNQ: ['MNQ_INTRADAY', 'MNQ_SWING', 'MNQ_50PT'],
+  MNQ: ['MNQ_INTRADAY', 'NQ_NY_OPEN', 'MNQ_FIRE'],
   MGC: ['MGC_SCALP'],
 };
 const INSTRUMENTS = Object.keys(INSTRUMENT_STRATEGIES);

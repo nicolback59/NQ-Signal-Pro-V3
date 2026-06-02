@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS signals (
   direction      TEXT    NOT NULL CHECK(direction IN ('LONG','SHORT')),
   grade          TEXT             CHECK(grade IN ('A+','A','BE')),
   setup          TEXT,
-  strategy_name  TEXT,          -- 'MNQ_INTRADAY' | 'MNQ_SWING' | 'MNQ_50PT' | 'MGC_SCALP'
+  strategy_name  TEXT,          -- 'MNQ_INTRADAY' | 'MGC_SCALP' | 'NQ_NY_OPEN' | 'MNQ_FIRE'
   entry          REAL,
   sl             REAL,
   tp1            REAL,
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS strategy_params (
 
 -- Per-style strategy parameters (one row per instrument+style key)
 CREATE TABLE IF NOT EXISTS style_params (
-  key         TEXT    PRIMARY KEY,   -- e.g. 'MNQ_SCALP', 'MNQ_SWING', 'MGC_SCALP'
+  key         TEXT    PRIMARY KEY,   -- e.g. 'MNQ_INTRADAY_scalp', 'MGC_SCALP_default'
   params_json TEXT    NOT NULL,
   updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
   version     INTEGER DEFAULT 1
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
   timestamp      TEXT,
   direction      TEXT,
   setup          TEXT,
-  strategy_name  TEXT,   -- 'MNQ_INTRADAY' | 'MNQ_SWING' | 'MNQ_50PT' | 'MGC_SCALP'
+  strategy_name  TEXT,   -- 'MNQ_INTRADAY' | 'MGC_SCALP' | 'NQ_NY_OPEN' | 'MNQ_FIRE'
   trade_style    TEXT,
   regime         TEXT,
   entry          REAL,
@@ -266,7 +266,7 @@ CREATE TABLE IF NOT EXISTS weekly_summaries (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   week_start           TEXT    NOT NULL,  -- Monday date, e.g. "2025-05-05"
   week_label           TEXT    NOT NULL,  -- human label, e.g. "Week of May 5, 2025"
-  strategy_key         TEXT    NOT NULL,  -- MGC_SCALP | MNQ_INTRADAY | MNQ_SWING | MNQ_50PT | MGC_INTRADAY
+  strategy_key         TEXT    NOT NULL,  -- MNQ_INTRADAY | MGC_SCALP | NQ_NY_OPEN | MNQ_FIRE
   strategy_label       TEXT    NOT NULL,  -- human label
   total_signals        INTEGER DEFAULT 0,
   wins                 INTEGER DEFAULT 0,
