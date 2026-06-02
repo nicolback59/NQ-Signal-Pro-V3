@@ -2130,6 +2130,23 @@ app.get('/api/signals', (req, res) => {
   res.json(rows);
 });
 
+// Returns the single most recent signal from the live strategies (MGC_SCALP / MNQ_INTRADAY).
+// Used by the homepage hero card. Does NOT filter on live_gated — strategy name guarantees
+// it is a live strategy, and realized-outcome signals must never be hidden by the research gate.
+app.get('/api/signals/latest', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const row = db.prepare(`
+    SELECT s.*, o.result, o.exit_price, o.exit_at, o.pnl_pts, o.pnl_usd,
+           o.expiration_reason AS outcome_expiration_reason
+    FROM   signals s
+    LEFT   JOIN outcomes o ON o.signal_id = s.id
+    WHERE  s.strategy_name IN ('MGC_SCALP', 'MNQ_INTRADAY')
+    ORDER  BY s.received_at DESC
+    LIMIT  1
+  `).get();
+  res.json(row ?? null);
+});
+
 // Returns ONLY genuinely active (unresolved) signals.
 // Server-side filtered — the frontend OPEN tab should prefer this endpoint.
 app.get('/api/signals/open', (req, res) => {

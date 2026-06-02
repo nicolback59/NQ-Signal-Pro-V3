@@ -496,8 +496,8 @@
       <div class="section-card-body" style="padding:10px 14px 12px">
         <div style="position:relative;height:110px" id="mnqChartWrap">
           <canvas id="mnqChart"></canvas>
-          <div id="mnqChartEmpty" style="display:none;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.5">
-            Chart data unavailable.<br>Waiting for market feed.
+          <div id="mnqChartEmpty" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.5">
+            Waiting for live market feed.
           </div>
         </div>
         <div style="display:flex;justify-content:space-between;margin-top:6px">
@@ -516,8 +516,8 @@
       <div class="section-card-body" style="padding:10px 14px 12px">
         <div style="position:relative;height:110px" id="mgcChartWrap">
           <canvas id="mgcChart"></canvas>
-          <div id="mgcChartEmpty" style="display:none;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.5">
-            Chart data unavailable.<br>Waiting for market feed.
+          <div id="mgcChartEmpty" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.5">
+            Waiting for live market feed.
           </div>
         </div>
         <div style="display:flex;justify-content:space-between;margin-top:6px">
@@ -745,24 +745,34 @@ async function loadPriceCharts() {
       fetch('/api/market/candles/MGC?limit=60').then(r => r.json()).catch(() => []),
     ]);
 
+    // Unhide/hide canvases first — browser must reflow before Chart.js measures dimensions.
+    // If the canvas was previously hidden (display:none from _showEmptyChart) and we
+    // build the chart in the same synchronous tick, the canvas has 0 dimensions and the
+    // chart renders invisibly. requestAnimationFrame waits one paint cycle.
     if (mnqBars.length > 1) {
       document.getElementById('mnqChartEmpty').style.display = 'none';
       document.getElementById('mnqChart').style.display = '';
-      if (_mnqChart) _mnqChart.destroy();
-      _mnqChart = buildCandlestickChart('mnqChart', mnqBars, 0);
-      _updateChartMeta('MNQ', mnqBars, 0);
     } else {
       _showEmptyChart('MNQ');
     }
-
     if (mgcBars.length > 1) {
       document.getElementById('mgcChartEmpty').style.display = 'none';
       document.getElementById('mgcChart').style.display = '';
+    } else {
+      _showEmptyChart('MGC');
+    }
+
+    await new Promise(r => requestAnimationFrame(r));
+
+    if (mnqBars.length > 1) {
+      if (_mnqChart) _mnqChart.destroy();
+      _mnqChart = buildCandlestickChart('mnqChart', mnqBars, 0);
+      _updateChartMeta('MNQ', mnqBars, 0);
+    }
+    if (mgcBars.length > 1) {
       if (_mgcChart) _mgcChart.destroy();
       _mgcChart = buildCandlestickChart('mgcChart', mgcBars, 2);
       _updateChartMeta('MGC', mgcBars, 2);
-    } else {
-      _showEmptyChart('MGC');
     }
   } catch { /* never crash the page */ }
 }
@@ -1237,28 +1247,23 @@ async function load() {
   document.getElementById('sessionPill').textContent = mkt.session;
 
   try {
-    const [sigsRes, statsRes, journalRes, pricesRes, learningRes] = await Promise.all([
+    const [sigsRes, latestSigRes, statsRes, journalRes, pricesRes, learningRes] = await Promise.all([
       fetch('/api/signals?limit=30'),
+      fetch('/api/signals/latest'),
       fetch('/api/stats'),
       fetch('/api/journal/signals?limit=100'),
       fetch('/api/market/prices').catch(() => null),
       fetch('/api/learning').catch(() => null),
     ]);
-    const [sigs, stats, journal, prices, learning] = await Promise.all([
+    const [sigs, latestSig, stats, journal, prices, learning] = await Promise.all([
       sigsRes.json(),
+      latestSigRes.json().catch(() => null),
       statsRes.json(),
       journalRes.json(),
       pricesRes ? pricesRes.json() : Promise.resolve({}),
       learningRes ? learningRes.json() : Promise.resolve({}),
     ]);
 
-    // Latest signal: most recent from live strategies (MGC_SCALP or MNQ_INTRADAY),
-    // ordered by received_at DESC from the API. Never filter by outcome status —
-    // the old logic skipped resolved signals and fell through to stale OPEN trades.
-    const LIVE_STRATS = new Set(['MGC_SCALP', 'MNQ_INTRADAY']);
-    const latestSig = Array.isArray(sigs)
-      ? (sigs.find(s => LIVE_STRATS.has(s.strategy_name)) || sigs[0] || null)
-      : null;
     renderHero(latestSig);
     renderRecordBar(stats, journal);
     renderStats(stats, sigs, journal);
@@ -1293,6 +1298,8 @@ function startCountdown(secs) {
 
 load().then(() => {
   startCountdown(30);
+  // Charts refresh independently every 60s so they update even between main load() cycles
+  setInterval(loadPriceCharts, 60_000);
   // Connect SSE for real-time scanner updates (supplements 30s polling)
   connectSSE();
   initUserMenu();
