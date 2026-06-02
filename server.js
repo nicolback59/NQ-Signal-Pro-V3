@@ -1791,6 +1791,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notif_sent   ON notification_log(sent_at DESC);
 `);
 
+// Migration: add channel column to existing notification_log tables created before this column existed
+(function migrateNotificationLog() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(notification_log)").all().map(r => r.name);
+    if (!cols.includes('channel')) {
+      db.exec("ALTER TABLE notification_log ADD COLUMN channel TEXT NOT NULL DEFAULT 'ntfy'");
+      console.log('[migration] Added channel column to notification_log');
+    }
+  } catch (err) { console.error('[migration] notification_log channel:', err.message); }
+})();
+
 thresholdManager.init(db);
 
 const insertSignal = db.prepare(`
