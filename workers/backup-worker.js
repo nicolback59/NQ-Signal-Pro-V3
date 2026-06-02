@@ -173,39 +173,29 @@ async function runBackup() {
     console.log(`[${WORKER_NAME}] Cloud backup skipped — DO_SPACES_KEY/SECRET/BUCKET not configured`);
   }
 
-  // ── ntfy summary ─────────────────────────────────────────────────────────
-  const ntfyUrl   = (process.env.NTFY_URL   || 'https://ntfy.sh').replace(/\/$/, '');
-  const ntfyTopic = process.env.NTFY_TOPIC  || '';
-  const ntfyToken = process.env.NTFY_TOKEN  || '';
-
-  if (ntfyTopic) {
-    const cloudLine = CLOUD_ENABLED
-      ? (cloudError
-          ? `☁️ Cloud upload FAILED: ${cloudError}`
-          : `☁️ Cloud upload OK — ${SPACES_BUCKET}/backups/${path.basename(destPath)}`)
-      : '☁️ Cloud backup not configured';
-
-    const body = [
-      `💾 Local: ${localSizeMb} MB → ${path.basename(destPath)} (${localElapsed}s)`,
-      cloudLine,
-      `🗂 Local retention: last ${KEEP_LOCAL} days | Cloud retention: last ${KEEP_CLOUD} days`,
-    ].join('\n');
-
-    try {
-      const headers = {
-        'Content-Type': 'text/plain',
-        'Title':    cloudError
-          ? 'Aurum Signals — Backup: local OK, cloud FAILED'
-          : 'Aurum Signals — Nightly backup complete',
-        'Priority': cloudError ? 'default' : 'min',
-        'Tags':     cloudError ? 'floppy_disk,warning' : 'floppy_disk',
-      };
-      if (ntfyToken) headers['Authorization'] = `Bearer ${ntfyToken}`;
-      await fetch(`${ntfyUrl}/${ntfyTopic}`, {
-        method: 'POST', headers, body,
-        signal: AbortSignal.timeout(5_000),
-      });
-    } catch (_) { /* non-critical */ }
+  // ── ntfy — failure only ───────────────────────────────────────────────────
+  // Successful backups go to logs only. Only cloud upload failures get a push
+  // notification because they require action (check DO Spaces credentials/quota).
+  if (CLOUD_ENABLED && cloudError) {
+    const ntfyUrl   = (process.env.NTFY_URL   || 'https://ntfy.sh').replace(/\/$/, '');
+    const ntfyTopic = process.env.NTFY_TOPIC  || '';
+    const ntfyToken = process.env.NTFY_TOKEN  || '';
+    if (ntfyTopic) {
+      try {
+        const headers = {
+          'Content-Type': 'text/plain',
+          'Title':    'Aurum Signals — Backup: cloud upload FAILED',
+          'Priority': 'default',
+          'Tags':     'floppy_disk,warning',
+        };
+        if (ntfyToken) headers['Authorization'] = `Bearer ${ntfyToken}`;
+        await fetch(`${ntfyUrl}/${ntfyTopic}`, {
+          method: 'POST', headers,
+          body: `Local backup OK (${localSizeMb} MB).\nCloud upload FAILED: ${cloudError}`,
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch (_) { /* non-critical */ }
+    }
   }
 
   // Exit non-zero if cloud was attempted but failed — PM2 will log the error

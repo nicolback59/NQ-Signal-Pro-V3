@@ -1791,18 +1791,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notif_sent   ON notification_log(sent_at DESC);
 `);
 
-// Migration: add columns to existing notification_log tables created before channel/title were added
+// Migration: add all columns that were added to notification_log after initial deployment.
+// The original table had only: id, signal_id, event_type, sent_at.
+// Each ALTER TABLE is guarded independently so a partial failure doesn't block the rest.
 (function migrateNotificationLog() {
   try {
     const cols = db.prepare("PRAGMA table_info(notification_log)").all().map(r => r.name);
-    if (!cols.includes('channel')) {
-      db.exec("ALTER TABLE notification_log ADD COLUMN channel TEXT NOT NULL DEFAULT 'ntfy'");
-      console.log('[migration] Added channel column to notification_log');
-    }
-    if (!cols.includes('title')) {
-      db.exec("ALTER TABLE notification_log ADD COLUMN title TEXT");
-      console.log('[migration] Added title column to notification_log');
-    }
+    const add  = (col, def) => {
+      if (!cols.includes(col)) {
+        db.exec(`ALTER TABLE notification_log ADD COLUMN ${def}`);
+        console.log(`[migration] notification_log: added ${col}`);
+      }
+    };
+    add('channel',   "channel   TEXT    NOT NULL DEFAULT 'ntfy'");
+    add('title',     "title     TEXT");
+    add('success',   "success   INTEGER NOT NULL DEFAULT 1");
+    add('latency_s', "latency_s REAL");
+    add('error_msg', "error_msg TEXT");
   } catch (err) { console.error('[migration] notification_log:', err.message); }
 })();
 
