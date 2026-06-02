@@ -4060,128 +4060,15 @@ class Scanner extends EventEmitter {
     this._log(formatStartupConfig(cfg.duplicateGuardMin));
 
     this._log(`SCANNER_BOOT_SUCCESS all subsystems armed — scanner is live`, 'signal');
-
-    // ── Startup notification — only on REAL outages ───────────────────────────
-    // Logic: compare last worker_health heartbeat timestamp to now.
-    //   Gap < 5 min  → crash-loop restart, suppress (scanner was just running)
-    //   Gap ≥ 5 min  → genuine outage (deploy, server reboot, long crash) → notify
-    //   No record    → first ever boot → notify
-    //
-    // This means:
-    //  • PM2 crash-loop (restart every 2 min): NEVER notifies
-    //  • Manual deploy (git pull + pm2 restart): notifies IF deploy took >5 min offline
-    //  • Server reboot / long outage: always notifies
-    //  • Repeated manual restarts in quick succession: only first one notifies
-    if (cfg.ntfyTopic) {
-      setTimeout(() => {
-        if (this._startupNtfySent) return;
-        try {
-          // Read last healthy heartbeat from worker_health
-          const row = this.db.prepare(
-            "SELECT last_heartbeat FROM worker_health WHERE worker_name = 'scanner-worker'"
-          ).get();
-
-          if (row?.last_heartbeat) {
-            const lastMs  = new Date(row.last_heartbeat).getTime();
-            const gapMins = (Date.now() - lastMs) / 60_000;
-            if (gapMins < 5) {
-              this._log(`[ntfy] startup notification suppressed — crash-loop guard (gap=${gapMins.toFixed(1)} min < 5 min threshold)`, 'signal');
-              return;
-            }
-            this._log(`[ntfy] genuine outage detected (gap=${gapMins.toFixed(1)} min) — sending startup notification`, 'signal');
-          } else {
-            this._log('[ntfy] first boot — sending startup notification', 'signal');
-          }
-        } catch (e) { this._log(`[ntfy] startup gap-check error (proceeding): ${e.message}`, 'signal'); }
-
-        this._startupNtfySent = true;
-        const headers = {
-          'Content-Type': 'text/plain',
-          'Title':    'Aurum Signals - Online',
-          'Priority': 'low',
-          'Tags':     'white_check_mark',
-        };
-        if (cfg.ntfyToken) headers['Authorization'] = `Bearer ${cfg.ntfyToken}`;
-        fetch(`${cfg.ntfyUrl}/${cfg.ntfyTopic}`, { method: 'POST', headers, body: 'Scanner back online' })
-          .then(r => this._log(`[ntfy] startup notification sent — HTTP ${r.status}`, 'signal'))
-          .catch(err => this._log(`[ntfy] startup notification FAILED: ${err.message}`, 'signal'));
-      }, 5_000);
-    }
-
-    // ── Daily operational heartbeat — one quiet summary per day ──────────────
-    // Fires once per day (checked hourly). See _maybeSendDailyHeartbeat().
-    if (cfg.ntfyTopic) {
-      setTimeout(() => this._maybeSendDailyHeartbeat().catch(() => {}), 90_000);
-      this._intervals.push(setInterval(
-        () => this._maybeSendDailyHeartbeat().catch(() => {}),
-        60 * 60_000
-      ));
-    }
+    // Startup and heartbeat push notifications removed — feed-watchdog-worker
+    // handles genuine outage detection (scanner stale > 10 min) with a 30-min
+    // cooldown and fires recovery alerts when the scanner comes back. That is
+    // the correct layer: it has process isolation, proper cooldowns, and email
+    // fallback. Scanner-initiated "back online" pings caused alert fatigue
+    // because normal deploys (6-15 min) always exceeded the 5-min suppression
+    // window, generating a push notification on every merge/restart.
 
     return this;
-  }
-
-  // ── Daily operational heartbeat ───────────────────────────────────────────────
-  // Sends ONE quiet summary notification per day between 08:00–09:00.
-  // Does NOT fire during normal scan loops — only called from a 1-hour check interval.
-  // Provides professional "system healthy" signal without startup spam.
-  async _maybeSendDailyHeartbeat() {
-    if (!this.cfg.ntfyTopic || !this.cfg.ntfyUrl) return;
-    const now  = new Date();
-    const hour = now.getHours();
-    if (hour < 8 || hour >= 9) return; // Only fire in the 08:00–09:00 window
-
-    const HEARTBEAT_KEY = 'SYSTEM:DAILY_HEARTBEAT';
-    const todayStr      = now.toISOString().slice(0, 10); // YYYY-MM-DD
-
-    try {
-      // Check if already sent today (key expires after 23 hours)
-      const existing = this.db.prepare(
-        "SELECT expires_at FROM dedup_ideas WHERE key = ? AND expires_at > ?"
-      ).get(HEARTBEAT_KEY, Date.now());
-      if (existing) return; // Already sent today
-
-      // Atomic claim
-      const info = this.db.prepare(`
-        INSERT OR IGNORE INTO dedup_ideas
-          (key, expires_at, instrument, direction, family, strategy, session, entry, sl)
-        VALUES (?, ?, 'SYSTEM', 'NONE', 'SYSTEM', 'SYSTEM', NULL, 0, 0)
-      `).run(HEARTBEAT_KEY, Date.now() + 23 * 60 * 60_000);
-      if (info.changes === 0) return; // Another process sent it
-    } catch { return; }
-
-    // Build summary
-    try {
-      const uptimeH = Math.round(process.uptime() / 3600);
-      const signalsToday = this.db.prepare(
-        "SELECT COUNT(*) AS n FROM signals WHERE date(received_at) = date('now')"
-      ).get()?.n ?? 0;
-      const winsToday = this.db.prepare(`
-        SELECT COUNT(*) AS n FROM outcomes o
-        JOIN signals s ON s.id = o.signal_id
-        WHERE date(s.received_at) = date('now') AND o.result = 'WIN'
-      `).get()?.n ?? 0;
-      const feedOk = this._lastDataStatus !== 'ERROR';
-
-      const headers = {
-        'Content-Type': 'text/plain',
-        'Title':    `Aurum Signals — Daily Check-In`,
-        'Priority': 'low',
-        'Tags':     'green_circle',
-      };
-      if (this.cfg.ntfyToken) headers['Authorization'] = `Bearer ${this.cfg.ntfyToken}`;
-      const body = [
-        `Operational — ${todayStr}`,
-        `Uptime: ${uptimeH}h`,
-        `Signals today: ${signalsToday} (${winsToday} wins)`,
-        `Data feed: ${feedOk ? 'healthy' : 'degraded'}`,
-        `Strategies: MNQ_INTRADAY, MGC_SCALP`,
-      ].join('\n');
-
-      fetch(`${this.cfg.ntfyUrl}/${this.cfg.ntfyTopic}`, { method: 'POST', headers, body })
-        .then(r => this._log(`[ntfy] daily heartbeat sent — HTTP ${r.status}`, 'signal'))
-        .catch(err => this._log(`[ntfy] daily heartbeat FAILED: ${err.message}`, 'signal'));
-    } catch (e) { this._log(`[ntfy] daily heartbeat error: ${e.message}`, 'signal'); }
   }
 
   stop() {
