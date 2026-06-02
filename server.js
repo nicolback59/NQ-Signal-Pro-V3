@@ -533,6 +533,115 @@ function _deferredBtDedup() {
     console.error('[dedup] backtest dedup error:', err.message);
   }
 }
+// ── START SERVER — bind port BEFORE migrations run ───────────────────────────
+// Render's health check starts immediately after the process launches. All
+// migration IIFEs below are synchronous and block the event loop for several
+// seconds, keeping the port closed and triggering "connection refused".
+// Calling app.listen() here binds the OS-level socket now; the callback fires
+// only after all synchronous code (migrations + routes) has completed, so every
+// variable it references is guaranteed to be defined when it runs.
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Aurum Signals → http://localhost:${PORT}`);
+  console.log(`SQLite         → ${DB_PATH}`);
+  console.log(`Scanner mode   → ${process.env.SCANNER_MODE === 'worker' ? 'WORKER (separate process)' : 'INLINE'}`);
+
+  // Write api-server's own heartbeat — visible in /api/status workers field
+  const _apiHeartbeat = () => {
+    try {
+      db.prepare(`
+        INSERT INTO worker_health (worker_name, status, last_heartbeat, metadata)
+        VALUES ('api-server', 'RUNNING', datetime('now'), ?)
+        ON CONFLICT(worker_name) DO UPDATE SET
+          status         = 'RUNNING',
+          last_heartbeat = datetime('now'),
+          metadata       = excluded.metadata,
+          cycle_count    = COALESCE(cycle_count, 0) + 1
+      `).run(JSON.stringify({ pid: process.pid, port: PORT, uptime: Math.floor(process.uptime()) }));
+    } catch (_) { /* never crash */ }
+  };
+  _apiHeartbeat();
+  setInterval(_apiHeartbeat, 30000); // refresh every 30s
+
+  if (process.env.SCANNER_MODE === 'worker') {
+    // ── WORKER MODE: scanner runs as a separate PM2 process ──────────────────
+    // SSE events arrive via sse_queue table — poll every 1 second.
+    // Bar data comes from bar_cache table.
+    // Scanner state is read from worker_health table.
+    let _lastSseId = 0;
+    try {
+      const row = db.prepare('SELECT MAX(id) AS maxId FROM sse_queue').get();
+      _lastSseId = row?.maxId ?? 0;
+    } catch (_) { /* start from 0 */ }
+
+    setInterval(() => {
+      if (!_sseClients.size) return;
+      try {
+        const events = db.prepare(
+          'SELECT id, event_type, data FROM sse_queue WHERE id > ? ORDER BY id ASC LIMIT 50'
+        ).all(_lastSseId);
+        for (const ev of events) {
+          try {
+            _broadcastSSE(ev.event_type, JSON.parse(ev.data));
+          } catch (_) { /* malformed data — skip */ }
+          _lastSseId = ev.id;
+        }
+        // Purge expired events (keep table lean)
+        db.prepare("DELETE FROM sse_queue WHERE expires_at < datetime('now')").run();
+      } catch (_) { /* never crash the server */ }
+    }, 1000);
+
+    console.log('[api-server] SSE queue polling started — waiting for scanner-worker events');
+
+  } else {
+    // ── INLINE MODE: scanner runs inside this process (default / legacy) ─────
+    const scanner = new Scanner(db);
+    global._scanner = scanner;
+
+    scanner.on('signal',    data => _broadcastSSE('signal',    data));
+    scanner.on('scan',      data => _broadcastSSE('scan',      data));
+    scanner.on('heartbeat', data => {
+      _broadcastSSE('heartbeat', data);
+      // Write to worker_health so /api/health sees the inline scanner as healthy.
+      // scanner-worker.js does this when running as a PM2 process; in inline mode
+      // (Render) we mirror that write here so the health check returns 200.
+      try {
+        db.prepare(`
+          INSERT INTO worker_health (worker_name, status, last_heartbeat, metadata)
+          VALUES ('scanner-worker', 'RUNNING', datetime('now'), ?)
+          ON CONFLICT(worker_name) DO UPDATE SET
+            status         = 'RUNNING',
+            last_heartbeat = datetime('now'),
+            metadata       = excluded.metadata
+        `).run(JSON.stringify({
+          scanCount:  data.scanCount,
+          feedType:   data.feedType,
+          dataStatus: data.marketClosed ? 'CLOSED' : 'DATA_OK',
+        }));
+      } catch (_) {}
+    });
+    scanner.on('backtest',  data => _broadcastSSE('backtest',  data));
+    scanner.on('outcome',   data => _broadcastSSE('outcome',   data));
+    scanner.on('error',     data => _broadcastSSE('scannerError', data));
+
+    // Prune stale sse_queue rows even in inline mode (table may accumulate from prior worker-mode runs)
+    setInterval(() => {
+      try { db.prepare("DELETE FROM sse_queue WHERE expires_at < datetime('now')").run(); } catch (_) {}
+    }, 60_000);
+
+    scanner.start();
+    console.log('[api-server] Scanner started inline');
+  }
+
+  // Graceful shutdown
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.once(sig, () => {
+      console.log(`[${new Date().toISOString()}] Shutting down gracefully…`);
+      if (global._scanner) { try { global._scanner.stop(); } catch (_) {} }
+      process.exit(0);
+    });
+  }
+});
+
 applyMigrations();
 
 // Phase 3 migration: feature_correlations + agent trust columns
@@ -560,6 +669,8 @@ applyMigrations();
     if (!atCols.includes('recommendations')) db.exec("ALTER TABLE agent_trust_scores ADD COLUMN recommendations INTEGER DEFAULT 0");
     if (!atCols.includes('correct_calls'))   db.exec("ALTER TABLE agent_trust_scores ADD COLUMN correct_calls INTEGER DEFAULT 0");
     if (!atCols.includes('incorrect_calls')) db.exec("ALTER TABLE agent_trust_scores ADD COLUMN incorrect_calls INTEGER DEFAULT 0");
+    if (!atCols.includes('trust_score'))     db.exec("ALTER TABLE agent_trust_scores ADD COLUMN trust_score  REAL    DEFAULT 0.5");
+    if (!atCols.includes('description'))     db.exec("ALTER TABLE agent_trust_scores ADD COLUMN description  TEXT");
     for (const agent of ['feature-intelligence', 'consensus-coordinator']) {
       db.prepare(`INSERT OR IGNORE INTO agent_trust_scores(agent_name) VALUES(?)`).run(agent);
     }
@@ -5115,105 +5226,4 @@ app.get('/setup',           (req, res) => res.sendFile(path.join(__dirname, 'set
 app.get('/forgot-password', (req, res) => res.sendFile(path.join(__dirname, 'forgot-password.html')));
 app.get('/reset-password',  (req, res) => res.sendFile(path.join(__dirname, 'reset-password.html')));
 
-// ── START SERVER ─────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Aurum Signals → http://localhost:${PORT}`);
-  console.log(`SQLite         → ${DB_PATH}`);
-  console.log(`Scanner mode   → ${process.env.SCANNER_MODE === 'worker' ? 'WORKER (separate process)' : 'INLINE'}`);
-
-  // Write api-server's own heartbeat — visible in /api/status workers field
-  const _apiHeartbeat = () => {
-    try {
-      db.prepare(`
-        INSERT INTO worker_health (worker_name, status, last_heartbeat, metadata)
-        VALUES ('api-server', 'RUNNING', datetime('now'), ?)
-        ON CONFLICT(worker_name) DO UPDATE SET
-          status         = 'RUNNING',
-          last_heartbeat = datetime('now'),
-          metadata       = excluded.metadata,
-          cycle_count    = COALESCE(cycle_count, 0) + 1
-      `).run(JSON.stringify({ pid: process.pid, port: PORT, uptime: Math.floor(process.uptime()) }));
-    } catch (_) { /* never crash */ }
-  };
-  _apiHeartbeat();
-  setInterval(_apiHeartbeat, 30000); // refresh every 30s
-
-  if (process.env.SCANNER_MODE === 'worker') {
-    // ── WORKER MODE: scanner runs as a separate PM2 process ──────────────────
-    // SSE events arrive via sse_queue table — poll every 1 second.
-    // Bar data comes from bar_cache table.
-    // Scanner state is read from worker_health table.
-    let _lastSseId = 0;
-    try {
-      const row = db.prepare('SELECT MAX(id) AS maxId FROM sse_queue').get();
-      _lastSseId = row?.maxId ?? 0;
-    } catch (_) { /* start from 0 */ }
-
-    setInterval(() => {
-      if (!_sseClients.size) return;
-      try {
-        const events = db.prepare(
-          'SELECT id, event_type, data FROM sse_queue WHERE id > ? ORDER BY id ASC LIMIT 50'
-        ).all(_lastSseId);
-        for (const ev of events) {
-          try {
-            _broadcastSSE(ev.event_type, JSON.parse(ev.data));
-          } catch (_) { /* malformed data — skip */ }
-          _lastSseId = ev.id;
-        }
-        // Purge expired events (keep table lean)
-        db.prepare("DELETE FROM sse_queue WHERE expires_at < datetime('now')").run();
-      } catch (_) { /* never crash the server */ }
-    }, 1000);
-
-    console.log('[api-server] SSE queue polling started — waiting for scanner-worker events');
-
-  } else {
-    // ── INLINE MODE: scanner runs inside this process (default / legacy) ─────
-    const scanner = new Scanner(db);
-    global._scanner = scanner;
-
-    scanner.on('signal',    data => _broadcastSSE('signal',    data));
-    scanner.on('scan',      data => _broadcastSSE('scan',      data));
-    scanner.on('heartbeat', data => {
-      _broadcastSSE('heartbeat', data);
-      // Write to worker_health so /api/health sees the inline scanner as healthy.
-      // scanner-worker.js does this when running as a PM2 process; in inline mode
-      // (Render) we mirror that write here so the health check returns 200.
-      try {
-        db.prepare(`
-          INSERT INTO worker_health (worker_name, status, last_heartbeat, metadata)
-          VALUES ('scanner-worker', 'RUNNING', datetime('now'), ?)
-          ON CONFLICT(worker_name) DO UPDATE SET
-            status         = 'RUNNING',
-            last_heartbeat = datetime('now'),
-            metadata       = excluded.metadata
-        `).run(JSON.stringify({
-          scanCount:  data.scanCount,
-          feedType:   data.feedType,
-          dataStatus: data.marketClosed ? 'CLOSED' : 'DATA_OK',
-        }));
-      } catch (_) {}
-    });
-    scanner.on('backtest',  data => _broadcastSSE('backtest',  data));
-    scanner.on('outcome',   data => _broadcastSSE('outcome',   data));
-    scanner.on('error',     data => _broadcastSSE('scannerError', data));
-
-    // Prune stale sse_queue rows even in inline mode (table may accumulate from prior worker-mode runs)
-    setInterval(() => {
-      try { db.prepare("DELETE FROM sse_queue WHERE expires_at < datetime('now')").run(); } catch (_) {}
-    }, 60_000);
-
-    scanner.start();
-    console.log('[api-server] Scanner started inline');
-  }
-
-  // Graceful shutdown
-  for (const sig of ['SIGTERM', 'SIGINT']) {
-    process.once(sig, () => {
-      console.log(`[${new Date().toISOString()}] Shutting down gracefully…`);
-      if (global._scanner) { try { global._scanner.stop(); } catch (_) {} }
-      process.exit(0);
-    });
-  }
-});
+// app.listen() moved to before applyMigrations() — see top of migrations section.
