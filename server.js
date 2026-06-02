@@ -3715,11 +3715,16 @@ app.get('/api/health', (req, res) => {
     // reconHealthy is intentionally excluded: reconcile-worker runs on the Droplet
     // (PM2), not on Render. Its staleness is reported in the response but must
     // not block the 200 — otherwise Render's health check always fails.
-    const overallHealthy  = dbOk && scannerHealthy;
+
+    // Grace window: scanner writes its first heartbeat ~4s after port binds.
+    // Return 200 during the first 60s so Render doesn't fail the deploy before
+    // the scanner has had a chance to register its first heartbeat.
+    const startupGrace   = process.uptime() < 60;
+    const overallHealthy = dbOk && (scannerHealthy || startupGrace);
 
     res.set('Cache-Control', 'no-store');
     res.status(overallHealthy ? 200 : 503).json({
-      status:   overallHealthy ? 'healthy' : 'degraded',
+      status: overallHealthy ? (scannerHealthy ? 'healthy' : 'starting') : 'degraded',
       database: dbOk ? 'ok' : 'error',
       scanner: {
         healthy:     scannerHealthy,
