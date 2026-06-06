@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import type { SystemLogEntry } from '../../types';
 
 export function ErrorLog(): JSX.Element {

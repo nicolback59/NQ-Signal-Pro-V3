@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import type { BotTrade } from '../../types';
 
 const MNQ_POINT_VALUE = 2.0;

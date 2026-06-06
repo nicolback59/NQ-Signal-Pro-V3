@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import type { WeeklyStats, DailyStats } from '../../types';
 
 export function WeeklyReport(): JSX.Element {

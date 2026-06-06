@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from "react";
 import type { BacktestPeriod, BacktestResult } from '../../types';
 
 const PERIODS: BacktestPeriod[] = [90, 180, 365];

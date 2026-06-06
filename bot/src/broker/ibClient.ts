@@ -91,6 +91,25 @@ export class IBClient implements IBrokerClient {
     this.wireBaseEvents();
   }
 
+  /**
+   * @stoqey/ib types `on`/`off` with per-event listener overloads that don't
+   * unify well with reusable handler closures. The runtime is a plain
+   * EventEmitter, so we register through this loosely-typed view.
+   */
+  private get bus(): {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    on(event: string, listener: (...args: any[]) => void): unknown;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    off(event: string, listener: (...args: any[]) => void): unknown;
+  } {
+    return this.api as unknown as {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      on(event: string, listener: (...args: any[]) => void): unknown;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      off(event: string, listener: (...args: any[]) => void): unknown;
+    };
+  }
+
   // ── Connection ─────────────────────────────────────────────────────────────
 
   private wireBaseEvents(): void {
@@ -229,6 +248,8 @@ export class IBClient implements IBrokerClient {
         reject(new Error(`getBars timeout for ${symbol} ${timeframe}`));
       }, 20_000);
 
+      // @stoqey/ib emits historicalData per bar, then a single terminator
+      // emit whose date field starts with "finished" and OHLC are -1.
       const onBar = (
         id: number,
         time: string,
@@ -239,6 +260,11 @@ export class IBClient implements IBrokerClient {
         volume: number,
       ): void => {
         if (id !== reqId) return;
+        if (typeof time === 'string' && time.startsWith('finished')) {
+          cleanup();
+          resolve(bars.slice(-count));
+          return;
+        }
         bars.push({
           timestamp: this.parseIBTime(time),
           open,
@@ -247,12 +273,6 @@ export class IBClient implements IBrokerClient {
           close,
           volume: volume < 0 ? 0 : volume,
         });
-      };
-
-      const onEnd = (id: number): void => {
-        if (id !== reqId) return;
-        cleanup();
-        resolve(bars.slice(-count));
       };
 
       const onErr = (err: Error, code: number, id: number): void => {
@@ -264,14 +284,12 @@ export class IBClient implements IBrokerClient {
 
       const cleanup = (): void => {
         clearTimeout(timeout);
-        this.api.off(EventName.historicalData, onBar);
-        this.api.off(EventName.historicalDataEnd, onEnd);
-        this.api.off(EventName.error, onErr);
+        this.bus.off(EventName.historicalData, onBar);
+        this.bus.off(EventName.error, onErr);
       };
 
-      this.api.on(EventName.historicalData, onBar);
-      this.api.on(EventName.historicalDataEnd, onEnd);
-      this.api.on(EventName.error, onErr);
+      this.bus.on(EventName.historicalData, onBar);
+      this.bus.on(EventName.error, onErr);
 
       this.api.reqHistoricalData(
         reqId,
@@ -343,7 +361,7 @@ export class IBClient implements IBrokerClient {
       });
     };
 
-    this.api.on(EventName.realtimeBar, onRtBar);
+    this.bus.on(EventName.realtimeBar, onRtBar);
 
     try {
       this.api.reqRealTimeBars(reqId, contract, 5, 'TRADES', false);
@@ -486,12 +504,12 @@ export class IBClient implements IBrokerClient {
 
       const cleanup = (): void => {
         clearTimeout(timeout);
-        this.api.off(EventName.openOrder, onOpen);
-        this.api.off(EventName.openOrderEnd, onEnd);
+        this.bus.off(EventName.openOrder, onOpen);
+        this.bus.off(EventName.openOrderEnd, onEnd);
       };
 
-      this.api.on(EventName.openOrder, onOpen);
-      this.api.on(EventName.openOrderEnd, onEnd);
+      this.bus.on(EventName.openOrder, onOpen);
+      this.bus.on(EventName.openOrderEnd, onEnd);
       this.api.reqOpenOrders();
     });
   }
@@ -528,12 +546,12 @@ export class IBClient implements IBrokerClient {
 
       const cleanup = (): void => {
         clearTimeout(timeout);
-        this.api.off(EventName.position, onPos);
-        this.api.off(EventName.positionEnd, onEnd);
+        this.bus.off(EventName.position, onPos);
+        this.bus.off(EventName.positionEnd, onEnd);
       };
 
-      this.api.on(EventName.position, onPos);
-      this.api.on(EventName.positionEnd, onEnd);
+      this.bus.on(EventName.position, onPos);
+      this.bus.on(EventName.positionEnd, onEnd);
       this.api.reqPositions();
     });
   }

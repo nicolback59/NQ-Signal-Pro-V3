@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BotState, BiasLabel } from '../../types';
 
 function fmtCountdown(ms: number | null): string {

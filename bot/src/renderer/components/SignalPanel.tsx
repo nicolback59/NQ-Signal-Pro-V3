@@ -1,4 +1,3 @@
-import React from 'react';
 import type { SignalSnapshot } from '../../types';
 
 function scoreClass(score: number): string {

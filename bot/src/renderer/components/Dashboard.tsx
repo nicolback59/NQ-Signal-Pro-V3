@@ -1,4 +1,3 @@
-import React from 'react';
 import { SignalPanel } from './SignalPanel';
 import { TradePanel } from './TradePanel';
 import type { BotState } from '../../types';
