@@ -11,7 +11,12 @@
     "test:ntfy-entry": "node scripts/test-ntfy.js entry",
     "test:ntfy-win": "node scripts/test-ntfy.js win",
     "test:ntfy-loss": "node scripts/test-ntfy.js loss",
-    "test:ntfy-expired": "node scripts/test-ntfy.js expired"
+    "test:ntfy-expired": "node scripts/test-ntfy.js expired",
+    "build": "tsc",
+    "build:watch": "tsc -w"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

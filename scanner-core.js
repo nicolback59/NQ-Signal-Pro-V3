@@ -127,6 +127,8 @@ class Scanner extends EventEmitter {
     this.cfg = {
       symbol:          config.symbol          || process.env.SCANNER_SYMBOL       || 'NQ=F',
       symbolMgc:       config.symbolMgc       || process.env.SCANNER_SYMBOL_MGC   || 'GC=F',
+      symbolEs:        config.symbolEs        || process.env.SCANNER_SYMBOL_ES    || 'ES=F',
+      symbolNq:        config.symbolNq        || process.env.SCANNER_SYMBOL_NQ    || 'NQ=F',
       scanInterval:    config.scanInterval    || Math.min(parseInt(process.env.SCAN_INTERVAL || '30') * 1000, 300_000),
       duplicateGuardMin: config.duplicateGuardMin || parseInt(process.env.SCANNER_DUPLICATE_GUARD_MIN || '5'),
       baseScore:       config.baseScore       || parseInt(process.env.SCANNER_MIN_SCORE   || '6'),
@@ -180,6 +182,7 @@ class Scanner extends EventEmitter {
     // Cache last known good bars so a transient fetch error doesn't kill the scan
     this._lastGoodBars = {
       mnq5m: [], mnq1h: [], mgc5m: [], mgc1h: [],
+      es5m: [], nq5m: [],
     };
 
     // 1m bars fetched separately for outcome resolution (TP1/SL detection granularity)
@@ -1867,7 +1870,7 @@ class Scanner extends EventEmitter {
 
   // ── Per-instrument scan ───────────────────────────────────────────────────────
 
-  async _scanInstrument(instrument, bars5m, bars15m, bars1h, bars4h, barsDly, bars30m = [], bars45m = [], bars3m = []) {
+  async _scanInstrument(instrument, bars5m, bars15m, bars1h, bars4h, barsDly, bars30m = [], bars45m = [], bars3m = [], extraBars = {}) {
     const duplicateGuardMs = this.cfg.duplicateGuardMin * 60_000;
 
     // Daily cap
@@ -1899,7 +1902,7 @@ class Scanner extends EventEmitter {
 
     const barSets = instrument === 'MGC'
       ? { bars3mMgc: bars3m, bars5mMgc: bars5m, bars15mMgc: bars15m, bars30mMgc: bars30m, bars45mMgc: bars45m, bars1hMgc: bars1h }
-      : { bars5m, bars15m, bars1h, bars4h, barsDly };
+      : { bars5m, bars15m, bars1h, bars4h, barsDly, esBars5m: extraBars.esBars5m ?? [], nqBars5m: extraBars.nqBars5m ?? [] };
 
     this._log(`STRATEGY_SCAN_START instrument=${instrument} bars5m=${bars5m.length} bars15m=${bars15m.length} bars1h=${bars1h.length}`, 'signal');
     const signals         = evaluateAll(barSets, { instrument });
@@ -1912,34 +1915,6 @@ class Scanner extends EventEmitter {
       this._log(`SIGNAL_CANDIDATE_CREATED ${instrument} ${summary}`, 'signal');
     } else {
       this._log(`STRATEGY_SCAN_COMPLETE instrument=${instrument} candidates=0 scan=#${this._scanCount}`, 'signal');
-    }
-
-    // ── Minimum daily signal guarantee — 3-tier confidence relaxation ────────────
-    // Target: 20 signals per instrument per day (20 MNQ + 20 MGC = 40 total).
-    // Cap: 20 per instrument — fills the full allocation every trading day.
-    // Duplicate guard (SCANNER_DUPLICATE_GUARD_MIN) keeps cap clean; adaptive cooldown handles real timing.
-    // When behind pace, confidence gate is progressively relaxed across the day.
-    const todayCountNow = this._stmts.dailySignalCount.get(instrument)?.cnt ?? 0;
-    const minTarget     = this.cfg.dailyMinSignals ?? 20;
-    const nowHhmm = (() => {
-      const d = new Date();
-      return (d.getUTCHours() - 4) * 100 + d.getUTCMinutes(); // rough ET
-    })();
-    // Expected pace: 20 signals over 6.5h ≈ 3 signals/hour
-    //   By 9:30 AM  → 0 expected (market just opened)
-    //   By 11:00 AM → ~5 expected
-    //   By 1:00 PM  → ~11 expected
-    //   By 3:00 PM  → ~17 expected
-    const expectedByNow = Math.min(minTarget, Math.max(0, Math.round((nowHhmm - 930) / 650 * minTarget)));
-    const pace          = todayCountNow - expectedByNow; // negative = behind pace
-    let minConfBonus = 0;
-    if      (pace <= -8  && nowHhmm >= 1300 && nowHhmm < 1600) minConfBonus = -22; // very behind afternoon
-    else if (pace <= -5  && nowHhmm >= 1100 && nowHhmm < 1600) minConfBonus = -16; // behind midday
-    else if (pace <= -3  && nowHhmm >= 930  && nowHhmm < 1600) minConfBonus = -10; // slightly behind morning
-    else if (pace <= -1  && nowHhmm >= 930  && nowHhmm < 1600) minConfBonus = -6;  // just a bit slow
-
-    if (minConfBonus < 0 && this._scanCount % 3 === 0) {
-      this._log(`📊 ${instrument} pace: ${todayCountNow}/${minTarget} (expected ${expectedByNow}) — gate ${minConfBonus} pts`);
     }
 
     // Load adaptive overrides once per scan (auto-computed from live WR data)
@@ -2144,13 +2119,12 @@ class Scanner extends EventEmitter {
       // Learned confidence gate — threshold evolves based on backtest win rates.
       // Pattern memory, DNA gate, and opening candle bias all tune the effective gate.
       const learnedMin = getLearnedThreshold(this.db, sig.strategy_name, sig.confidence * 0.9);
-      const effectiveMin = Math.round(learnedMin + patternAdj + dnaGateAdj + ocAdj + minConfBonus);
+      const effectiveMin = Math.round(learnedMin + patternAdj + dnaGateAdj + ocAdj);
       if (sig.confidence < effectiveMin) {
         const adjParts = [];
         if (patternAdj !== 0) adjParts.push(`pattern${patternAdj > 0 ? '+' : ''}${patternAdj}`);
         if (dnaGateAdj  !== 0) adjParts.push(`dna${dnaGateAdj > 0 ? '+' : ''}${dnaGateAdj}`);
         if (ocAdj       !== 0) adjParts.push(`oc${ocAdj > 0 ? '+' : ''}${ocAdj}`);
-        if (minConfBonus < 0) adjParts.push(`pace${minConfBonus}`);
         const adjStr = adjParts.length ? ` [${adjParts.join(' ')}]` : '';
         this._log(`SIGNAL_FILTERED_OUT reason=confidence_below_threshold strat=${sig.strategy_name} conf=${sig.confidence} threshold=${effectiveMin} base=${learnedMin}${adjStr}`, 'signal');
         this._storeRejection(instrument, sig.direction, sig.setup, sig.strategy_name,
@@ -2641,9 +2615,23 @@ class Scanner extends EventEmitter {
         }
       }
 
+      // Fetch ES bars for SSOT MNQ confirmation
+      let es5mBars = this._lastGoodBars.es5m;
+      let nq5mBars = this._lastGoodBars.nq5m;
+      try {
+        const [esFresh, nqFresh] = await Promise.all([
+          this._fetchYahooBars(this.cfg.symbolEs, '5m', '5d'),
+          this._fetchYahooBars(this.cfg.symbolNq, '5m', '5d'),
+        ]);
+        if (esFresh.length > 5) { es5mBars = esFresh; this._lastGoodBars.es5m = esFresh; }
+        if (nqFresh.length > 5) { nq5mBars = nqFresh; this._lastGoodBars.nq5m = nqFresh; }
+      } catch (err) {
+        this._log(`ES/NQ fetch error (using last known): ${err.message}`, 'signal');
+      }
+
       // Signal evaluation uses confirmed bars; outcome resolution uses full bars (including forming)
       await Promise.all([
-        mnqReady ? this._scanInstrument('MNQ', mnq5mConf, mnq15m, mnq1hConf, mnq4h, mnqDly) : null,
+        mnqReady ? this._scanInstrument('MNQ', mnq5mConf, mnq15m, mnq1hConf, mnq4h, mnqDly, [], [], [], { esBars5m: es5mBars, nqBars5m: nq5mBars }) : null,
         mgcReady ? this._scanInstrument('MGC', mgc5mConf, mgc15m, mgc1hConf, [], [], mgc30m, mgc45m, []) : null,
       ].filter(Boolean));
 
