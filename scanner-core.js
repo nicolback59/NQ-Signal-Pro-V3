@@ -127,6 +127,8 @@ class Scanner extends EventEmitter {
     this.cfg = {
       symbol:          config.symbol          || process.env.SCANNER_SYMBOL       || 'NQ=F',
       symbolMgc:       config.symbolMgc       || process.env.SCANNER_SYMBOL_MGC   || 'GC=F',
+      symbolEs:        config.symbolEs        || process.env.SCANNER_SYMBOL_ES    || 'ES=F',
+      symbolNq:        config.symbolNq        || process.env.SCANNER_SYMBOL_NQ    || 'NQ=F',
       scanInterval:    config.scanInterval    || Math.min(parseInt(process.env.SCAN_INTERVAL || '30') * 1000, 300_000),
       duplicateGuardMin: config.duplicateGuardMin || parseInt(process.env.SCANNER_DUPLICATE_GUARD_MIN || '5'),
       baseScore:       config.baseScore       || parseInt(process.env.SCANNER_MIN_SCORE   || '6'),
@@ -180,6 +182,7 @@ class Scanner extends EventEmitter {
     // Cache last known good bars so a transient fetch error doesn't kill the scan
     this._lastGoodBars = {
       mnq5m: [], mnq1h: [], mgc5m: [], mgc1h: [],
+      es5m: [], nq5m: [],
     };
 
     // 1m bars fetched separately for outcome resolution (TP1/SL detection granularity)
@@ -2641,9 +2644,23 @@ class Scanner extends EventEmitter {
         }
       }
 
+      // Fetch ES bars for SSOT MNQ confirmation
+      let es5mBars = this._lastGoodBars.es5m;
+      let nq5mBars = this._lastGoodBars.nq5m;
+      try {
+        const [esFresh, nqFresh] = await Promise.all([
+          this._fetchYahooBars(this.cfg.symbolEs, '5m', '5d'),
+          this._fetchYahooBars(this.cfg.symbolNq, '5m', '5d'),
+        ]);
+        if (esFresh.length > 5) { es5mBars = esFresh; this._lastGoodBars.es5m = esFresh; }
+        if (nqFresh.length > 5) { nq5mBars = nqFresh; this._lastGoodBars.nq5m = nqFresh; }
+      } catch (err) {
+        this._log(`ES/NQ fetch error (using last known): ${err.message}`, 'signal');
+      }
+
       // Signal evaluation uses confirmed bars; outcome resolution uses full bars (including forming)
       await Promise.all([
-        mnqReady ? this._scanInstrument('MNQ', mnq5mConf, mnq15m, mnq1hConf, mnq4h, mnqDly) : null,
+        mnqReady ? this._scanInstrument('MNQ', mnq5mConf, mnq15m, mnq1hConf, mnq4h, mnqDly, [], [], [], { esBars5m: es5mBars, nqBars5m: nq5mBars }) : null,
         mgcReady ? this._scanInstrument('MGC', mgc5mConf, mgc15m, mgc1hConf, [], [], mgc30m, mgc45m, []) : null,
       ].filter(Boolean));
 

@@ -515,6 +515,30 @@ function checkESConfirmation(esInd, direction, htfBias) {
         esInd.makingLHLL &&
         esInd.momentumBearish;
     const confirmed = isLong ? longConfirmed : shortConfirmed;
+    if (!confirmed) {
+        const missing = [];
+        if (isLong) {
+            if (!esInd.makingHHHL)
+                missing.push('NO_HHHLS');
+            if (!esInd.momentumBullish)
+                missing.push('ES_MOMENTUM_NOT_BULL');
+        }
+        else {
+            if (!esInd.makingLHLL)
+                missing.push('NO_LHLLS');
+            if (!esInd.momentumBearish)
+                missing.push('ES_MOMENTUM_NOT_BEAR');
+        }
+        if (missing.length > 0) {
+            return {
+                confirmed: false,
+                direction,
+                confidenceBonus: 0,
+                esLeadership: false,
+                rejectReason: missing.join('+'),
+            };
+        }
+    }
     // ES leadership: ES HTF flipped before MNQ
     const esLeadership = esInd.htfFlippedBeforeMNQ;
     const confidenceBonus = esLeadership ? 5 : 0;
@@ -754,10 +778,8 @@ function scoreMNQ(params) {
     if (esConfirm != null) {
         if (esConfirm.esLeadership)
             esLeadershipBonus = 5;
-        // MNQ moved without ES: when ES is not confirmed but we reached this point
-        // (edge case: partial ES data), apply penalty
-        else if (!esConfirm.confirmed && esConfirm.confidenceBonus === 0)
-            esLeadershipBonus = -10;
+        else
+            esLeadershipBonus = -10; // ES confirmed but lagged — MNQ moved without ES leading
     }
     // ── Market breadth bonus (+5 to +10) ────────────────────────────────────
     let breadthBonus = 0;
