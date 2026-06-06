@@ -1917,34 +1917,6 @@ class Scanner extends EventEmitter {
       this._log(`STRATEGY_SCAN_COMPLETE instrument=${instrument} candidates=0 scan=#${this._scanCount}`, 'signal');
     }
 
-    // ── Minimum daily signal guarantee — 3-tier confidence relaxation ────────────
-    // Target: 20 signals per instrument per day (20 MNQ + 20 MGC = 40 total).
-    // Cap: 20 per instrument — fills the full allocation every trading day.
-    // Duplicate guard (SCANNER_DUPLICATE_GUARD_MIN) keeps cap clean; adaptive cooldown handles real timing.
-    // When behind pace, confidence gate is progressively relaxed across the day.
-    const todayCountNow = this._stmts.dailySignalCount.get(instrument)?.cnt ?? 0;
-    const minTarget     = this.cfg.dailyMinSignals ?? 20;
-    const nowHhmm = (() => {
-      const d = new Date();
-      return (d.getUTCHours() - 4) * 100 + d.getUTCMinutes(); // rough ET
-    })();
-    // Expected pace: 20 signals over 6.5h ≈ 3 signals/hour
-    //   By 9:30 AM  → 0 expected (market just opened)
-    //   By 11:00 AM → ~5 expected
-    //   By 1:00 PM  → ~11 expected
-    //   By 3:00 PM  → ~17 expected
-    const expectedByNow = Math.min(minTarget, Math.max(0, Math.round((nowHhmm - 930) / 650 * minTarget)));
-    const pace          = todayCountNow - expectedByNow; // negative = behind pace
-    let minConfBonus = 0;
-    if      (pace <= -8  && nowHhmm >= 1300 && nowHhmm < 1600) minConfBonus = -22; // very behind afternoon
-    else if (pace <= -5  && nowHhmm >= 1100 && nowHhmm < 1600) minConfBonus = -16; // behind midday
-    else if (pace <= -3  && nowHhmm >= 930  && nowHhmm < 1600) minConfBonus = -10; // slightly behind morning
-    else if (pace <= -1  && nowHhmm >= 930  && nowHhmm < 1600) minConfBonus = -6;  // just a bit slow
-
-    if (minConfBonus < 0 && this._scanCount % 3 === 0) {
-      this._log(`📊 ${instrument} pace: ${todayCountNow}/${minTarget} (expected ${expectedByNow}) — gate ${minConfBonus} pts`);
-    }
-
     // Load adaptive overrides once per scan (auto-computed from live WR data)
     let adaptiveOverrides = {};
     try { adaptiveOverrides = loadAdaptiveOverrides(this.db); } catch (err) { this._log(`load-adaptive-overrides error: ${err.message}`, 'signal'); }
@@ -2147,13 +2119,12 @@ class Scanner extends EventEmitter {
       // Learned confidence gate — threshold evolves based on backtest win rates.
       // Pattern memory, DNA gate, and opening candle bias all tune the effective gate.
       const learnedMin = getLearnedThreshold(this.db, sig.strategy_name, sig.confidence * 0.9);
-      const effectiveMin = Math.round(learnedMin + patternAdj + dnaGateAdj + ocAdj + minConfBonus);
+      const effectiveMin = Math.round(learnedMin + patternAdj + dnaGateAdj + ocAdj);
       if (sig.confidence < effectiveMin) {
         const adjParts = [];
         if (patternAdj !== 0) adjParts.push(`pattern${patternAdj > 0 ? '+' : ''}${patternAdj}`);
         if (dnaGateAdj  !== 0) adjParts.push(`dna${dnaGateAdj > 0 ? '+' : ''}${dnaGateAdj}`);
         if (ocAdj       !== 0) adjParts.push(`oc${ocAdj > 0 ? '+' : ''}${ocAdj}`);
-        if (minConfBonus < 0) adjParts.push(`pace${minConfBonus}`);
         const adjStr = adjParts.length ? ` [${adjParts.join(' ')}]` : '';
         this._log(`SIGNAL_FILTERED_OUT reason=confidence_below_threshold strat=${sig.strategy_name} conf=${sig.confidence} threshold=${effectiveMin} base=${learnedMin}${adjStr}`, 'signal');
         this._storeRejection(instrument, sig.direction, sig.setup, sig.strategy_name,
