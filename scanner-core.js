@@ -1870,7 +1870,7 @@ class Scanner extends EventEmitter {
 
   // ── Per-instrument scan ───────────────────────────────────────────────────────
 
-  async _scanInstrument(instrument, bars5m, bars15m, bars1h, bars4h, barsDly, bars30m = [], bars45m = [], bars3m = []) {
+  async _scanInstrument(instrument, bars5m, bars15m, bars1h, bars4h, barsDly, bars30m = [], bars45m = [], bars3m = [], extraBars = {}) {
     const duplicateGuardMs = this.cfg.duplicateGuardMin * 60_000;
 
     // Daily cap
@@ -1902,7 +1902,7 @@ class Scanner extends EventEmitter {
 
     const barSets = instrument === 'MGC'
       ? { bars3mMgc: bars3m, bars5mMgc: bars5m, bars15mMgc: bars15m, bars30mMgc: bars30m, bars45mMgc: bars45m, bars1hMgc: bars1h }
-      : { bars5m, bars15m, bars1h, bars4h, barsDly };
+      : { bars5m, bars15m, bars1h, bars4h, barsDly, esBars5m: extraBars.esBars5m ?? [], nqBars5m: extraBars.nqBars5m ?? [] };
 
     this._log(`STRATEGY_SCAN_START instrument=${instrument} bars5m=${bars5m.length} bars15m=${bars15m.length} bars1h=${bars1h.length}`, 'signal');
     const signals         = evaluateAll(barSets, { instrument });

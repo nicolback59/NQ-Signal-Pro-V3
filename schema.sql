@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS signals (
   ticker         TEXT    NOT NULL DEFAULT 'NQ1!',
   timeframe      TEXT,
   direction      TEXT    NOT NULL CHECK(direction IN ('LONG','SHORT')),
-  grade          TEXT             CHECK(grade IN ('A+','A','BE')),
+  grade          TEXT             CHECK(grade IN ('A+','A','B','C','BE')),
   setup          TEXT,
   strategy_name  TEXT,          -- 'MNQ_INTRADAY' | 'MGC_SCALP' | 'NQ_NY_OPEN' | 'MNQ_FIRE'
   entry          REAL,
